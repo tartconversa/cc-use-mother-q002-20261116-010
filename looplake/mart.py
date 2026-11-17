@@ -17,7 +17,7 @@ class Mart:
         return format(value, "f")
 
     def month(self, month: str, include_unresolved: bool = False):
-        facts = self.ledger.period(month)
+        facts = [fact for fact in self.ledger.period(month) if fact["state"] == "active"]
         statuses = {batch: self.reconciliation.batch(batch) for batch in sorted({f["batch_id"] for f in facts})}
         selected_batches = {batch for batch, status in statuses.items() if status["ready"] or include_unresolved}
         buckets = defaultdict(lambda: {"weight_kg": Decimal("0"), "payout_yuan": Decimal("0"),
@@ -66,7 +66,7 @@ class Mart:
         street_id = key(street_id, "street_id")
         if start_month > end_month:
             raise LakeError("invalid_range", "start_month follows end_month")
-        facts = [row for row in self.ledger.store.facts("WHERE street_id=?", (street_id,))
+        facts = [row for row in self.ledger.store.facts("WHERE street_id=? AND state='active'", (street_id,))
                  if start_month <= row["day"][:7] <= end_month]
         months = sorted({row["day"][:7] for row in facts})
         result = []

@@ -45,6 +45,8 @@ class EventInput(Strict):
     weight_kg: str | None = None
     payout_yuan: str | None = None
     metadata: dict = {}
+    corrects_external_id: str | None = None
+    corrected_at: str | None = None
 
 
 class ReleaseInput(Strict):
@@ -129,6 +131,18 @@ def create_app(db_path: str | Path | None = None):
     @app.get("/facts/{fact_id}")
     def fact(fact_id: int):
         return service.store.fact(fact_id)
+
+    @app.get("/facts/{fact_id}/corrections")
+    def fact_corrections(fact_id: int):
+        return service.corrections.chain(fact_id)
+
+    @app.get("/corrections/pending")
+    def corrections_pending():
+        return service.corrections.pending()
+
+    @app.post("/corrections/heal")
+    def corrections_heal():
+        return {"healed": service.corrections.heal_pending()}
 
     @app.get("/lineage/facts/{fact_id}")
     def fact_lineage(fact_id: int):

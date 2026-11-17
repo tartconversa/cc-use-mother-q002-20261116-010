@@ -57,3 +57,17 @@ def balanced_batch(batch_id: str = "batch-1", prefix: str = "a", material_id: st
         result.append(event("payout", prefix + "-payout", batch_id, material_id, weight,
                             payout_yuan=payout, **changes))
     return result
+
+
+def correction(correction_external_id: str, corrects_external_id: str, weight: str,
+               batch_id: str = "batch-1", corrected_at: str | None = None,
+               happened_at: str | None = None, source: str = "scale-feed", **changes):
+    """Build a weigh_correction event referencing the original scale ticket."""
+    row = {"source": source, "external_id": correction_external_id,
+           "event_type": "weigh_correction",
+           "happened_at": happened_at or corrected_at or "2026-08-02T09:00:00+08:00",
+           "batch_id": batch_id, "channel": "scale", "weight_kg": weight,
+           "corrects_external_id": corrects_external_id,
+           "corrected_at": corrected_at or happened_at or "2026-08-02T08:30:00+08:00"}
+    row.update(changes)
+    return row

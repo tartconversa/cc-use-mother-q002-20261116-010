@@ -13,6 +13,53 @@ class Release:
         self.store, self.mart, self.reconciliation = store, mart, reconciliation
         self.inventory = inventory
 
+    def _corrections_impacting_month(self, conn, month: str) -> list[int]:
+        pending_docs = self.store.all(
+            conn,
+            "SELECT id, source, external_id, "
+            "json_extract(raw_json,'$.corrects_external_id') AS corrects_external_id "
+            "FROM ingestions WHERE state='quarantined' AND "
+            "json_extract(raw_json,'$.event_type')='weigh_correction'")
+        scale_fact_months = self.store.all(
+            conn, "SELECT DISTINCT source, substr(day,1,7) AS month FROM facts "
+                  "WHERE event_type IN ('weigh_in','weigh_out')")
+        sources_in_month = {row["source"] for row in scale_fact_months if row["month"] == month}
+        # Every fact external id per source, used to terminate the walk.
+        fact_tickets = {}
+        for row in self.store.all(conn, "SELECT source, external_id, substr(day,1,7) AS month FROM facts"):
+            fact_tickets.setdefault((row["source"], row["external_id"]), row["month"])
+        # Pending documents keyed by their own document id (out-of-order hops).
+        pending_by_doc = {(row["source"], row["external_id"]): row for row in pending_docs}
+        # Healed correction documents keyed by document id.
+        healed_by_doc = {(row["source"], row["correction_external_id"]): row["corrects_external_id"]
+                         for row in self.store.all(
+                             conn, "SELECT source, correction_external_id, corrects_external_id "
+                                   "FROM weigh_corrections")}
+        impacting = []
+        for row in pending_docs:
+            if row["source"] not in sources_in_month:
+                continue
+            seen = set()
+            ticket = row["corrects_external_id"]
+            source = row["source"]
+            while ticket and (source, ticket) not in seen:
+                seen.add((source, ticket))
+                if (source, ticket) in fact_tickets:
+                    if fact_tickets[(source, ticket)] == month:
+                        impacting.append(row["id"])
+                    break
+                if (source, ticket) in healed_by_doc:
+                    ticket = healed_by_doc[(source, ticket)]
+                    continue
+                predecessor = pending_by_doc.get((source, ticket))
+                if predecessor is None or predecessor["id"] == row["id"]:
+                    # Unresolved chain on a source that owns scale tickets in
+                    # this month: treat as impacting rather than silently ignore.
+                    impacting.append(row["id"])
+                    break
+                ticket = predecessor["corrects_external_id"]
+        return sorted(set(impacting))
+
     def preview(self, month: str):
         report = self.mart.month(month)
         checked = self.reconciliation.month(month)
@@ -20,12 +67,16 @@ class Release:
         with self.store.connect() as conn:
             quarantined = self.store.all(conn, "SELECT id FROM ingestions WHERE state='quarantined' AND substr(json_extract(raw_json,'$.happened_at'),1,7)=?",
                                          (month,))
+            # A correction can arrive in a later month yet target a ticket of
+            # the month being closed: such pending chain breaks must block too.
+            blocking = sorted({row["id"] for row in quarantined}
+                              | set(self._corrections_impacting_month(conn, month)))
         return {"month": month, "ready": report["ready"] and checked["ready"]
-                and (inventory is None or inventory["ready"]) and not quarantined,
+                and (inventory is None or inventory["ready"]) and not blocking,
                 "mart": report, "reconciliation": checked, "inventory": inventory,
-                "quarantined_ingestion_ids": [row["id"] for row in quarantined],
+                "quarantined_ingestion_ids": blocking,
                 "fingerprint": digest({"mart": report, "reconciliation": checked,
-                                       "inventory": inventory, "quarantined": quarantined})}
+                                       "inventory": inventory, "quarantined": blocking})}
 
     def publish(self, name: str, month: str, expected_fingerprint: str):
         name = key(name, "name")

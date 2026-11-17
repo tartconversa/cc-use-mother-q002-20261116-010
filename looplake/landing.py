@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import sqlite3
 
 from .dimensions import Dimensions
 from .model import LakeError, RawEvent, now
@@ -41,9 +42,20 @@ class Landing:
                                    (event.source, event.external_id))
             if prior:
                 raise LakeError("event_conflict", "same source event ID has different content", 409)
-            cursor = conn.execute("INSERT INTO ingestions(source,external_id,content_hash,raw_json,received_at,state) VALUES(?,?,?,?,?,?)",
-                                  (event.source, event.external_id, event.content_hash,
-                                   json.dumps(event.as_dict(), ensure_ascii=False, sort_keys=True), now(), "received"))
+            if prior:
+                raise LakeError("event_conflict", "same source event ID has different content", 409)
+            try:
+                cursor = conn.execute("INSERT INTO ingestions(source,external_id,content_hash,raw_json,received_at,state) VALUES(?,?,?,?,?,?)",
+                                      (event.source, event.external_id, event.content_hash,
+                                       json.dumps(event.as_dict(), ensure_ascii=False, sort_keys=True), now(), "received"))
+            except sqlite3.IntegrityError:
+                # Concurrent identical delivery won the unique(source,external_id,
+                # content_hash) race: replay stays idempotent instead of failing.
+                existing = self.store.one(conn, "SELECT * FROM ingestions WHERE source=? AND external_id=? AND content_hash=?",
+                                          (event.source, event.external_id, event.content_hash))
+                if existing:
+                    return Landed(existing["id"], event, False, existing["state"], existing["normalized_id"])
+                raise
             ingestion_id = cursor.lastrowid
             self.store.audit(conn, "landed", str(ingestion_id), {"source": event.source,
                                                                    "external_id": event.external_id,

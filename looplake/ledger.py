@@ -10,8 +10,9 @@ from .store import Store
 
 
 class Ledger:
-    def __init__(self, store: Store, dimensions: Dimensions, landing: Landing):
+    def __init__(self, store: Store, dimensions: Dimensions, landing: Landing, corrections=None):
         self.store, self.dimensions, self.landing = store, dimensions, landing
+        self.corrections = corrections
 
     def ingest(self, data: dict):
         landed = self.landing.accept(data)
@@ -38,6 +39,8 @@ class Ledger:
                     "issue": {"code": error.code, "detail": error.detail}}
 
     def _normalize(self, ingestion_id: int, event: RawEvent, created: bool):
+        if event.event_type == "weigh_correction":
+            return self.corrections.apply(ingestion_id, event, created)
         with self.store.write() as conn:
             row = self.store.one(conn, "SELECT * FROM ingestions WHERE id=?", (ingestion_id,))
             if row is None:
@@ -54,7 +57,7 @@ class Ledger:
                 raise LakeError("missing_station", "outbound weighing needs station")
             if event.event_type == "transfer" and "station" not in dims:
                 raise LakeError("missing_station", "transfer needs station")
-            cursor = conn.execute("INSERT INTO facts(ingestion_id,source,external_id,event_type,happened_at,day,batch_id,material_id,device_id,station_id,actor_id,street_id,community_id,weight_kg,payout_yuan,channel,dimensions_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            cursor = conn.execute("INSERT INTO facts(ingestion_id,source,external_id,event_type,happened_at,day,batch_id,material_id,device_id,station_id,actor_id,street_id,community_id,weight_kg,payout_yuan,channel,dimensions_json,state,supersedes_fact_id,root_fact_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'active',NULL,NULL)",
                                   (ingestion_id, event.source, event.external_id, event.event_type,
                                    event.happened_at, event.happened_at[:10], event.batch_id,
                                    event.material_id, event.device_id, event.station_id, event.actor_id,
@@ -62,21 +65,39 @@ class Ledger:
                                    event.weight_kg, event.payout_yuan, event.channel,
                                    json.dumps(dims, ensure_ascii=False, sort_keys=True)))
             fact_id = cursor.lastrowid
+            conn.execute("UPDATE facts SET root_fact_id=? WHERE id=?", (fact_id, fact_id))
             conn.execute("UPDATE ingestions SET state='normalized', issue=NULL,normalized_id=? WHERE id=?",
                          (fact_id, ingestion_id))
             self.store.audit(conn, "normalized", str(fact_id), {"ingestion_id": ingestion_id,
                                                                  "dimension_versions": {k: v["version"] for k, v in dims.items()}})
         return {"ingestion_id": ingestion_id, "fact_id": fact_id, "state": "normalized", "created": created}
 
-    def batch(self, batch_id: str):
+    def insert_fact(self, conn, ingestion_id: int, event: RawEvent, dims: dict,
+                    state: str = "active", supersedes_fact_id: int | None = None,
+                    root_fact_id: int | None = None, external_id: str | None = None) -> int:
+        cursor = conn.execute("INSERT INTO facts(ingestion_id,source,external_id,event_type,happened_at,day,batch_id,material_id,device_id,station_id,actor_id,street_id,community_id,weight_kg,payout_yuan,channel,dimensions_json,state,supersedes_fact_id,root_fact_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                              (ingestion_id, event.source, external_id or event.external_id,
+                               "weigh_in" if event.event_type == "weigh_correction" else event.event_type,
+                               event.happened_at, event.happened_at[:10], event.batch_id,
+                               event.material_id, event.device_id, event.station_id, event.actor_id,
+                               dims.get("street", {}).get("external_id"),
+                               dims.get("community", {}).get("external_id"),
+                               event.weight_kg, event.payout_yuan, event.channel,
+                               json.dumps(dims, ensure_ascii=False, sort_keys=True),
+                               state, supersedes_fact_id, root_fact_id))
+        return cursor.lastrowid
+
+    def batch(self, batch_id: str, include_superseded: bool = False):
         from .model import key
         batch_id = key(batch_id, "batch_id")
-        return self.store.facts("WHERE batch_id=?", (batch_id,))
+        where = "WHERE batch_id=?" + ("" if include_superseded else " AND state='active'")
+        return self.store.facts(where, (batch_id,))
 
-    def period(self, month: str):
+    def period(self, month: str, include_superseded: bool = False):
         from .model import calendar_day
         calendar_day(month + "-01", "month")
-        return self.store.facts("WHERE substr(day,1,7)=?", (month,))
+        where = "WHERE substr(day,1,7)=?" + ("" if include_superseded else " AND state='active'")
+        return self.store.facts(where, (month,))
 
     def trace(self, fact_id: int):
         fact = self.store.fact(fact_id)

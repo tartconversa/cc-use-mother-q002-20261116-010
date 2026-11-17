@@ -15,7 +15,7 @@ class Inventory:
         station_id = key(station_id, "station_id")
         material_id = key(material_id, "material_id")
         day = calendar_day(day, "day")
-        facts = self.ledger.store.facts("WHERE station_id=? AND material_id=? AND day<=?",
+        facts = self.ledger.store.facts("WHERE station_id=? AND material_id=? AND day<=? AND state='active'",
                                        (station_id, material_id, day))
         incoming = Decimal("0")
         outgoing = Decimal("0")
@@ -88,7 +88,7 @@ class Inventory:
         start, end = calendar_day(start, "start"), calendar_day(end, "end")
         if end < start:
             raise LakeError("invalid_range", "end precedes start")
-        facts = self.ledger.store.facts("WHERE station_id=? AND material_id=? AND day>=? AND day<=?",
+        facts = self.ledger.store.facts("WHERE station_id=? AND material_id=? AND day>=? AND day<=? AND state='active'",
                                        (station_id, material_id, start, end))
         rows = []
         for fact in facts:

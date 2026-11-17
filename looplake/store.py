@@ -31,10 +31,14 @@ CREATE TABLE IF NOT EXISTS facts (
  material_id TEXT, device_id TEXT, station_id TEXT, actor_id TEXT,
  street_id TEXT, community_id TEXT, weight_kg TEXT, payout_yuan TEXT,
  channel TEXT NOT NULL, dimensions_json TEXT NOT NULL,
- state TEXT NOT NULL DEFAULT 'active'
+ state TEXT NOT NULL DEFAULT 'active',
+ supersedes_fact_id INTEGER REFERENCES facts(id),
+ root_fact_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_fact_batch ON facts(batch_id,event_type);
 CREATE INDEX IF NOT EXISTS ix_fact_day ON facts(day,street_id,material_id);
+CREATE INDEX IF NOT EXISTS ix_fact_state ON facts(state,batch_id);
+CREATE INDEX IF NOT EXISTS ix_fact_root ON facts(root_fact_id);
 CREATE TABLE IF NOT EXISTS audit (
  id INTEGER PRIMARY KEY, at TEXT NOT NULL, action TEXT NOT NULL,
  subject TEXT NOT NULL, payload TEXT NOT NULL
@@ -54,7 +58,32 @@ CREATE TABLE IF NOT EXISTS rate_cards (
  UNIQUE(material_id,channel,version)
 );
 CREATE INDEX IF NOT EXISTS ix_rate_period ON rate_cards(material_id,channel,valid_from,valid_to);
+CREATE TABLE IF NOT EXISTS weigh_corrections (
+ id INTEGER PRIMARY KEY,
+ ingestion_id INTEGER NOT NULL UNIQUE REFERENCES ingestions(id),
+ replacement_fact_id INTEGER NOT NULL UNIQUE REFERENCES facts(id),
+ superseded_fact_id INTEGER NOT NULL REFERENCES facts(id),
+ root_fact_id INTEGER NOT NULL REFERENCES facts(id),
+ source TEXT NOT NULL,
+ corrects_external_id TEXT NOT NULL,
+ correction_external_id TEXT NOT NULL,
+ corrected_at TEXT NOT NULL,
+ received_at TEXT NOT NULL,
+ sequence_no INTEGER NOT NULL,
+ state TEXT NOT NULL,
+ UNIQUE(source,superseded_fact_id)
+);
+CREATE INDEX IF NOT EXISTS ix_correction_root ON weigh_corrections(root_fact_id,sequence_no);
+CREATE INDEX IF NOT EXISTS ix_correction_target ON weigh_corrections(source,corrects_external_id);
 """
+
+
+MIGRATIONS = (
+    ("facts", "supersedes_fact_id",
+     "ALTER TABLE facts ADD COLUMN supersedes_fact_id INTEGER REFERENCES facts(id)"),
+    ("facts", "root_fact_id",
+     "ALTER TABLE facts ADD COLUMN root_fact_id INTEGER"),
+)
 
 
 class Store:
@@ -62,7 +91,21 @@ class Store:
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
+            self._migrate(conn)
             conn.executescript(SCHEMA)
+
+    @staticmethod
+    def _migrate(conn):
+        tables = {row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        for table, column, statement in MIGRATIONS:
+            if table not in tables:
+                continue
+            if column is None:
+                continue
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                conn.execute(statement)
 
     @contextmanager
     def connect(self):

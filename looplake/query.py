@@ -14,7 +14,7 @@ class Query:
     def community_month(self, community_id: str, month: str):
         community_id = key(community_id, "community_id")
         calendar_day(month + "-01", "month")
-        facts = self.ledger.store.facts("WHERE community_id=? AND substr(day,1,7)=?",
+        facts = self.ledger.store.facts("WHERE community_id=? AND substr(day,1,7)=? AND state='active'",
                                        (community_id, month))
         deposits = [fact for fact in facts if fact["event_type"] == "deposit"]
         grouped = defaultdict(lambda: {"kg": Decimal("0"), "ids": []})
@@ -32,7 +32,7 @@ class Query:
         start, end = calendar_day(start, "start"), calendar_day(end, "end")
         if start > end:
             raise LakeError("invalid_range", "start follows end")
-        facts = self.ledger.store.facts("WHERE device_id=? AND day>=? AND day<=?",
+        facts = self.ledger.store.facts("WHERE device_id=? AND day>=? AND day<=? AND state='active'",
                                        (device_id, start, end))
         rows = [{"fact_id": fact["id"], "day": fact["day"],
                  "street_id": fact["street_id"], "community_id": fact["community_id"],
@@ -44,7 +44,7 @@ class Query:
     def source_month(self, source: str, month: str):
         source = key(source, "source")
         calendar_day(month + "-01", "month")
-        facts = self.ledger.store.facts("WHERE source=? AND substr(day,1,7)=?", (source, month))
+        facts = self.ledger.store.facts("WHERE source=? AND substr(day,1,7)=? AND state='active'", (source, month))
         by_type = defaultdict(lambda: {"count": 0, "weight": Decimal("0"), "payout": Decimal("0")})
         for fact in facts:
             row = by_type[fact["event_type"]]

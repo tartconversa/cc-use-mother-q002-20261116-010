@@ -101,9 +101,14 @@ class Dimension:
         return cls(kind, external_id, name, start, end, attrs)
 
 
-EVENT_TYPES = {"deposit", "weigh_in", "weigh_out", "transfer", "payout"}
+EVENT_TYPES = {"deposit", "weigh_in", "weigh_out", "transfer", "payout", "weigh_correction"}
 WEIGHT_EVENTS = {"deposit", "weigh_in", "weigh_out", "transfer"}
+SCALE_EVENTS = {"weigh_in", "weigh_out"}
 CHANNELS = {"smart_box", "scale", "station", "payment"}
+CORRECTION_ISSUE_CODES = {
+    "correction_chain_broken", "correction_target_invalid", "correction_chain_diverged",
+    "correction_unchanged",
+}
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,8 @@ class RawEvent:
     payout_yuan: str | None
     channel: str
     metadata: dict
+    corrects_external_id: str | None = None
+    corrected_at: str | None = None
 
     @classmethod
     def parse(cls, data: dict) -> "RawEvent":
@@ -130,6 +137,7 @@ class RawEvent:
         event_type = data.get("event_type")
         if event_type not in EVENT_TYPES:
             raise LakeError("invalid_event_type", "unsupported event type")
+        is_correction = event_type == "weigh_correction"
         happened_at = instant(data.get("happened_at"), "happened_at")
         batch_id = key(data.get("batch_id"), "batch_id")
         channel = data.get("channel")
@@ -138,7 +146,7 @@ class RawEvent:
         ids = {}
         for field in ("material_id", "device_id", "station_id", "actor_id"):
             ids[field] = key(data[field], field) if data.get(field) is not None else None
-        if event_type in WEIGHT_EVENTS and ids["material_id"] is None:
+        if not is_correction and event_type in WEIGHT_EVENTS and ids["material_id"] is None:
             raise LakeError("missing_material", "weight events require material_id")
         if channel == "smart_box" and ids["device_id"] is None:
             raise LakeError("missing_device", "smart_box events require device_id")
@@ -146,7 +154,7 @@ class RawEvent:
             raise LakeError("missing_station", "station events require station_id")
         weight = amount(data.get("weight_kg"), "weight_kg") if data.get("weight_kg") is not None else None
         payout = amount(data.get("payout_yuan"), "payout_yuan", True) if data.get("payout_yuan") is not None else None
-        if event_type in WEIGHT_EVENTS and weight is None:
+        if not is_correction and event_type in WEIGHT_EVENTS and weight is None:
             raise LakeError("missing_weight", "weight events require weight_kg")
         if event_type == "payout" and (payout is None or ids["actor_id"] is None):
             raise LakeError("missing_payout", "payout events require actor_id and payout_yuan")
@@ -154,14 +162,30 @@ class RawEvent:
             raise LakeError("invalid_channel", "payout channel must be payment")
         if event_type == "deposit" and channel != "smart_box":
             raise LakeError("invalid_channel", "deposit channel must be smart_box")
-        if event_type in {"weigh_in", "weigh_out"} and channel != "scale":
+        if event_type in SCALE_EVENTS and channel != "scale":
             raise LakeError("invalid_channel", "weighing channel must be scale")
+        corrects_external_id = None
+        corrected_at = None
+        if is_correction:
+            if channel != "scale":
+                raise LakeError("invalid_channel", "weigh correction channel must be scale")
+            if weight is None:
+                raise LakeError("missing_weight", "weigh correction requires corrected weight_kg")
+            if data.get("corrects_external_id") is None:
+                raise LakeError("missing_corrects", "weigh correction requires corrects_external_id")
+            corrects_external_id = key(data["corrects_external_id"], "corrects_external_id")
+            corrected_at = instant(data["corrected_at"], "corrected_at") if data.get("corrected_at") is not None else happened_at
+            if corrected_at > happened_at:
+                raise LakeError("invalid_corrected_at", "corrected_at cannot follow happened_at")
+        elif data.get("corrects_external_id") is not None or data.get("corrected_at") is not None:
+            raise LakeError("invalid_correction_fields", "correction fields only apply to weigh_correction")
         metadata = data.get("metadata", {})
         if not isinstance(metadata, dict) or len(json.dumps(metadata, ensure_ascii=False)) > 3000:
             raise LakeError("invalid_metadata", "metadata must be a small object")
         return cls(source, external_id, event_type, happened_at, batch_id,
                    ids["material_id"], ids["device_id"], ids["station_id"],
-                   ids["actor_id"], weight, payout, channel, metadata)
+                   ids["actor_id"], weight, payout, channel, metadata,
+                   corrects_external_id, corrected_at)
 
     def as_dict(self) -> dict:
         return self.__dict__.copy()

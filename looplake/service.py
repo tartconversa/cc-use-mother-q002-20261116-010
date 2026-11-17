@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .batch import BatchImport
+from .corrections import Corrections
 from .dimensions import Dimensions
 from .landing import Landing
 from .ledger import Ledger
@@ -21,7 +22,10 @@ class LakeService:
         self.store = Store(database_path)
         self.dimensions = Dimensions(self.store)
         self.landing = Landing(self.store, self.dimensions)
+        self.corrections = Corrections(self.store, None, self.landing)
         self.ledger = Ledger(self.store, self.dimensions, self.landing)
+        self.ledger.corrections = self.corrections
+        self.corrections.ledger = self.ledger
         self.inventory = Inventory(self.ledger)
         self.query = Query(self.ledger)
         self.settlement = Settlement(self.store)
@@ -46,6 +50,15 @@ class LakeService:
 
     def retry(self, ingestion_id):
         return self.ledger.normalize(ingestion_id)
+
+    def correction_chain(self, fact_id):
+        return self.corrections.chain(fact_id)
+
+    def pending_corrections(self):
+        return self.corrections.pending()
+
+    def heal_corrections(self):
+        return self.corrections.heal_pending()
 
     def batch_status(self, batch_id):
         return self.reconciliation.batch(batch_id)

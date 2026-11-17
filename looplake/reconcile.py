@@ -61,11 +61,33 @@ class Reconciliation:
         settled = self.settlement.batch(facts) if self.settlement else None
         if settled:
             issues.extend(settled["issues"])
+        correction_chains = self._correction_chains(facts)
         return {"batch_id": batch_id, "ready": not issues, "tolerance_kg": format(tolerance, "f"),
                 "deposit_kg": format(deposit, "f"), "weigh_in_kg": format(weighing_in, "f"),
                 "weigh_out_kg": format(weighing_out, "f"), "transfer_kg": format(transfer, "f"),
                 "payout_yuan": format(payout, "f"), "fact_ids": [fact["id"] for fact in facts],
-                "settlement": settled, "issues": issues}
+                "settlement": settled, "issues": issues,
+                "correction_count": len(correction_chains),
+                "correction_roots": [chain["root_fact_id"] for chain in correction_chains],
+                "correction_chains": correction_chains}
+
+    def _correction_chains(self, facts):
+        if not getattr(self.ledger, "corrections", None):
+            return []
+        root_ids = sorted({fact["root_fact_id"] or fact["id"] for fact in facts
+                           if fact.get("supersedes_fact_id") is not None})
+        chains = []
+        for root_id in root_ids:
+            chain = self.ledger.corrections.chain(root_id)
+            chains.append({"root_fact_id": root_id,
+                           "current_fact_id": chain["current_fact_id"],
+                           "current_weight_kg": chain["current_weight_kg"],
+                           "versions": [{"fact_id": version["fact_id"],
+                                         "weight_kg": version["weight_kg"],
+                                         "state": version["state"],
+                                         "version": version["version"]}
+                                        for version in chain["versions"]]})
+        return chains
 
     def month(self, month: str, tolerance_kg: str = "0.5"):
         rows = self.ledger.period(month)
